@@ -1,7 +1,7 @@
 use anyhow::anyhow;
 use sp_allocator::FreeingBumpHeapAllocator;
 use sp_wasm_interface::Pointer;
-use std::cell::{self, RefCell};
+use std::cell::RefCell;
 use std::fs;
 use std::rc::Rc;
 use wasmtime::*;
@@ -107,8 +107,7 @@ impl Callable for DummyCallable {
 fn main() -> anyhow::Result<()> {
     let code = fs::read("sc_runtime_test.wasm")?;
 
-    let mut config = Config::new();
-    config.debug_info(true);
+    let config = Config::new();
     let engine = Engine::new(&config);
 
     let store = Store::new(&engine);
@@ -149,7 +148,7 @@ fn main() -> anyhow::Result<()> {
             .clone(),
     );
 
-    let ret_values = instance
+    let _ret_values = instance
         .find_export_by_name("test_panic")
         .ok_or_else(|| anyhow!("`test_panic` is not found"))?
         .func()
