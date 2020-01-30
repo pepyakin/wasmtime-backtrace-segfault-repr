@@ -1668,6 +1668,8 @@ name = "wasmtime-backtrace-segfault-repr"
 version = "0.1.0"
 dependencies = [
  "anyhow 1.0.26 (registry+https://github.com/rust-lang/crates.io-index)",
+ "parity-scale-codec 1.1.2 (registry+https://github.com/rust-lang/crates.io-index)",
+ "rand 0.7.3 (registry+https://github.com/rust-lang/crates.io-index)",
  "sp-allocator 2.0.0 (git+https://github.com/paritytech/substrate.git?rev=22887d5)",
  "sp-wasm-interface 2.0.0 (git+https://github.com/paritytech/substrate.git?rev=22887d5)",
  "wasmtime 0.9.0 (registry+https://github.com/rust-lang/crates.io-index)",

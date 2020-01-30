@@ -11,3 +11,5 @@ wasmtime = "0.9.0"
 anyhow = "1.0.26"
 sp-allocator = { git = "https://github.com/paritytech/substrate.git", rev = "22887d5" }
 sp-wasm-interface = { git = "https://github.com/paritytech/substrate.git", rev = "22887d5" }
+parity-scale-codec = "1.1.2"
+rand = "0.7.3"

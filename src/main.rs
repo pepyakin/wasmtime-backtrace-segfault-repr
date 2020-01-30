@@ -1,10 +1,12 @@
 use anyhow::anyhow;
+use parity_scale_codec::Encode;
 use sp_allocator::FreeingBumpHeapAllocator;
 use sp_wasm_interface::Pointer;
 use std::cell::RefCell;
 use std::fs;
 use std::rc::Rc;
 use wasmtime::*;
+use rand::Rng;
 
 fn default_val(val_ty: &ValType) -> Val {
     match *val_ty {
@@ -60,10 +62,11 @@ struct DummyCallable {
     func_ty: FuncType,
     allocator: Rc<RefCell<FreeingBumpHeapAllocator>>,
     memory: MemoryHolder,
+    random_ptr: *const u8,
 }
 
-impl Callable for DummyCallable {
-    fn call(&self, params: &[Val], results: &mut [Val]) -> Result<(), Trap> {
+impl DummyCallable {
+    fn handle_call(&self, params: &[Val], results: &mut [Val]) -> Result<(), Trap> {
         println!("{}, params = {:?}", self.name, params);
         results
             .iter_mut()
@@ -104,7 +107,17 @@ impl Callable for DummyCallable {
     }
 }
 
-fn main() -> anyhow::Result<()> {
+impl Callable for DummyCallable {
+    fn call(&self, params: &[Val], results: &mut [Val]) -> Result<(), Trap> {
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            Self::handle_call(self, params, results)
+        }))
+        .map_err(|_| Trap::new("trap"))
+        .and_then(|i| i)
+    }
+}
+
+fn perform_call(random_ptr: *const u8) -> anyhow::Result<()> {
     let code = fs::read("sc_runtime_test.wasm")?;
 
     let config = Config::new();
@@ -127,6 +140,7 @@ fn main() -> anyhow::Result<()> {
                     func_ty: func_ty.clone(),
                     allocator: allocator.clone(),
                     memory: memory.clone(),
+                    random_ptr,
                 };
                 externs.push(Extern::Func(HostRef::new(Func::new(
                     &store,
@@ -148,13 +162,45 @@ fn main() -> anyhow::Result<()> {
             .clone(),
     );
 
+    let (ptr, len) =
+        inject_input_data(&mut *allocator.borrow_mut(), &memory, &vec![2].encode())?;
+
     let _ret_values = instance
-        .find_export_by_name("test_panic")
-        .ok_or_else(|| anyhow!("`test_panic` is not found"))?
+        .find_export_by_name("test_conditional_panic")
+        .ok_or_else(|| anyhow!("`test_conditional_panic` is not found"))?
         .func()
         .ok_or_else(|| anyhow!("is not a function"))?
         .borrow()
-        .call(&[])?;
+        .call(&[ptr, len]);
+
+    instance.get_wasmtime_memory();
 
     Ok(())
+}
+
+fn main() -> anyhow::Result<()> {
+    let mut garbage = [0u8; 1024 * 7600];
+    rand::thread_rng().fill(garbage.as_mut());
+    for i in 0..100 {
+        perform_call(garbage.as_ptr())?;
+    }
+    Ok(())
+}
+
+fn inject_input_data(
+    allocator: &mut FreeingBumpHeapAllocator,
+    memory: &MemoryHolder,
+    data: &[u8],
+) -> anyhow::Result<(Val, Val)> {
+    memory.with(|memory| unsafe {
+        let ptr = allocator.allocate(memory.data(), data.len() as u32)?;
+        let ptr = usize::from(ptr);
+
+        let dst = &mut memory.data()[ptr..(ptr + data.len())];
+        dst.copy_from_slice(data);
+        Ok((
+            Val::I32(ptr as u32 as i32),
+            Val::I32(data.len() as u32 as i32),
+        ))
+    })
 }
