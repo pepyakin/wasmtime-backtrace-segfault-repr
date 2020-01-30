@@ -6,7 +6,6 @@ use std::cell::RefCell;
 use std::fs;
 use std::rc::Rc;
 use wasmtime::*;
-use rand::Rng;
 
 fn default_val(val_ty: &ValType) -> Val {
     match *val_ty {
@@ -33,7 +32,7 @@ fn read_string(memory: &[u8], ptr: u32, len: u32) -> String {
 
 #[derive(Clone)]
 struct MemoryHolder {
-    inner: Rc<RefCell<Option<HostRef<Memory>>>>, // gross
+    inner: Rc<RefCell<Option<Memory>>>, // gross
 }
 
 impl MemoryHolder {
@@ -43,7 +42,7 @@ impl MemoryHolder {
         }
     }
 
-    fn set(&self, memory: HostRef<Memory>) {
+    fn set(&self, memory: Memory) {
         *self.inner.borrow_mut() = Some(memory);
     }
 
@@ -52,8 +51,7 @@ impl MemoryHolder {
         F: FnOnce(&Memory) -> R,
     {
         let guard = self.inner.borrow();
-        let another_guard = guard.as_ref().unwrap().borrow();
-        f(&*another_guard)
+        f(&*guard.as_ref().unwrap())
     }
 }
 
@@ -62,12 +60,11 @@ struct DummyCallable {
     func_ty: FuncType,
     allocator: Rc<RefCell<FreeingBumpHeapAllocator>>,
     memory: MemoryHolder,
-    random_ptr: *const u8,
 }
 
 impl DummyCallable {
     fn handle_call(&self, params: &[Val], results: &mut [Val]) -> Result<(), Trap> {
-        println!("{}, params = {:?}", self.name, params);
+        log::debug!(target: "host-call", " {}, params = {:?}", self.name, params);
         results
             .iter_mut()
             .enumerate()
@@ -78,7 +75,7 @@ impl DummyCallable {
                 let ptr = self.memory.with(|memory| {
                     self.allocator
                         .borrow_mut()
-                        .allocate(unsafe { memory.data() }, size)
+                        .allocate(unsafe { memory.data_unchecked_mut() }, size)
                         .map_err(|_| Trap::new("can't allocate"))
                 })?;
                 results[0] = Val::I32(usize::from(ptr) as i32);
@@ -88,7 +85,7 @@ impl DummyCallable {
                 self.memory.with(|memory| {
                     self.allocator
                         .borrow_mut()
-                        .deallocate(unsafe { memory.data() }, Pointer::new(ptr))
+                        .deallocate(unsafe { memory.data_unchecked_mut() }, Pointer::new(ptr))
                         .map_err(|_| Trap::new("can't deallocate"))
                 })?;
             }
@@ -96,8 +93,8 @@ impl DummyCallable {
                 let (target_ptr, target_len) = unpack_ptr_and_len(params[1].unwrap_i64() as u64);
                 let (msg_ptr, msg_len) = unpack_ptr_and_len(params[2].unwrap_i64() as u64);
                 self.memory.with(|memory| unsafe {
-                    let target = read_string(memory.data(), target_ptr, target_len);
-                    let msg = read_string(memory.data(), msg_ptr, msg_len);
+                    let target = read_string(memory.data_unchecked_mut(), target_ptr, target_len);
+                    let msg = read_string(memory.data_unchecked_mut(), msg_ptr, msg_len);
                     println!("{}: {}", target, msg);
                 });
             }
@@ -117,7 +114,7 @@ impl Callable for DummyCallable {
     }
 }
 
-fn perform_call(random_ptr: *const u8) -> anyhow::Result<()> {
+fn perform_call(method_name: &str, input_data: &[u8]) -> anyhow::Result<()> {
     let code = fs::read("sc_runtime_test.wasm")?;
 
     let config = Config::new();
@@ -140,50 +137,43 @@ fn perform_call(random_ptr: *const u8) -> anyhow::Result<()> {
                     func_ty: func_ty.clone(),
                     allocator: allocator.clone(),
                     memory: memory.clone(),
-                    random_ptr,
                 };
-                externs.push(Extern::Func(HostRef::new(Func::new(
+                externs.push(Extern::Func(Func::new(
                     &store,
                     func_ty.clone(),
                     Rc::new(callable),
-                ))));
+                )));
             }
             _ => return Err(anyhow!("can't provide non function import")),
         }
     }
 
-    let instance = Instance::new(&store, &module, &externs)?;
+    let instance = Instance::new(&module, &externs)?;
     memory.set(
         instance
-            .find_export_by_name("memory")
+            .get_export("memory")
             .ok_or_else(|| anyhow!("`memory` should be exported"))?
             .memory()
             .ok_or_else(|| anyhow!("`memory` should be of memory kind"))?
             .clone(),
     );
 
-    let (ptr, len) =
-        inject_input_data(&mut *allocator.borrow_mut(), &memory, &vec![2].encode())?;
+    let (ptr, len) = inject_input_data(&mut *allocator.borrow_mut(), &memory, input_data)?;
 
     let _ret_values = instance
-        .find_export_by_name("test_conditional_panic")
-        .ok_or_else(|| anyhow!("`test_conditional_panic` is not found"))?
+        .get_export(method_name)
+        .ok_or_else(|| anyhow!("`{}` is not found", method_name))?
         .func()
-        .ok_or_else(|| anyhow!("is not a function"))?
-        .borrow()
-        .call(&[ptr, len]);
-
-    instance.get_wasmtime_memory();
+        .ok_or_else(|| anyhow!("`{}` is not a function", method_name))?
+        .call(&[ptr, len])?;
 
     Ok(())
 }
 
 fn main() -> anyhow::Result<()> {
-    let mut garbage = [0u8; 1024 * 7600];
-    rand::thread_rng().fill(garbage.as_mut());
-    for i in 0..100 {
-        perform_call(garbage.as_ptr())?;
-    }
+    env_logger::init();
+    perform_call("test_conditional_panic", &vec![2].encode())?;
+    perform_call("test_panic", &[])?;
     Ok(())
 }
 
@@ -193,10 +183,10 @@ fn inject_input_data(
     data: &[u8],
 ) -> anyhow::Result<(Val, Val)> {
     memory.with(|memory| unsafe {
-        let ptr = allocator.allocate(memory.data(), data.len() as u32)?;
+        let ptr = allocator.allocate(memory.data_unchecked_mut(), data.len() as u32)?;
         let ptr = usize::from(ptr);
 
-        let dst = &mut memory.data()[ptr..(ptr + data.len())];
+        let dst = &mut memory.data_unchecked_mut()[ptr..(ptr + data.len())];
         dst.copy_from_slice(data);
         Ok((
             Val::I32(ptr as u32 as i32),
